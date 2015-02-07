@@ -7,3 +7,8 @@ The program is used to track and analyse the motion of a double pendulum. The do
 
 ## How to use it?
 When executing the python file a window will pop up and show the view of the webcam and wait for the user to make three double click in the window. These double clicks tell the program 1. where the axis of the pendulm is, 2. how the first marker looks like and 3. how the second marker looks like. 
+
+## Version
+0.1 First Commit
+
+0.2 Various Bugs fixed
