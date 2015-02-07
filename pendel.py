@@ -15,7 +15,7 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-__version__ = 0.1
+__version__ = 0.2
 
 
 import cv2
@@ -57,7 +57,15 @@ shape = []
 shift_color = lambda color,factor: np.array([np.clip(color[0]+factor*color_tolerance,0,255),np.clip(color[1]+factor*saturation_tolerance,0,255),np.clip(color[2]+factor*value_tolerance,0,255)],dtype=np.uint8)
 
 def calibration():
-    '''Show the video from the webcam and set position of the center, color of the first marker and color of the second marker chosen by the user with three consecutive double clicks''' 
+    '''Show the video from the webcam and set position of the center, color of the first marker and color of the second marker chosen by the user with three consecutive double clicks'''
+    #reset previous calibartion values
+    if len(positions_for_calibration)==2:
+        for i in range(2):
+            shape.pop()
+            positions_for_calibration.pop()
+            colors.pop()
+            color1range.pop()
+            color2range.pop()
     print 'Calibration: please doubleclick on the center, the first marker and the second marker'
     cv2.setMouseCallback('tracker',set_center_pos)
     while True:
@@ -87,7 +95,7 @@ def calibration():
     print "calibration complete"
     return None
 
-def capture():
+def capture(rotate_frames):
     '''capture one frame, locate the markers and return position'''
     _, frame = cap.read()
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -97,13 +105,19 @@ def capture():
     # Threshold the HSV image
     mask_color1 = cv2.inRange(hsv, lower_color1, upper_color1)
     mask_color2 = cv2.inRange(hsv, lower_color2, upper_color2)
-
-    x1,y1 = find_position(mask_color2)
+    #locate markers
+    x1,y1 = find_position(mask_color1)
     cv2.circle(frame, (y1, x1), 2, (255, 255, 255), 20)
-    x2,y2 = find_position(mask_color1)
+    x2,y2 = find_position(mask_color2)
     cv2.circle(frame, (y2, x2), 2, (255, 255, 255), 20)
     #display the image
-    cv2.imshow('tracker',frame)
+    if rotate_frames:
+        phi1,phi2 = to_phase_coordinate(np.array([y1,x1]),np.array([y2,x2]))
+        R = cv2.getRotationMatrix2D(tuple(center),-phi1*180/np.pi,1)
+        frame_rotated = cv2.warpAffine(frame,R,(frame.shape[1],frame.shape[0]))
+        cv2.imshow('tracker',frame_rotated)
+    else:
+        cv2.imshow('tracker',frame)
     k = cv2.waitKey(5) & 0xFF
     if k == 27:
         return x1,y1,x2,y2,True
@@ -114,11 +128,14 @@ def to_phase_coordinate(p1,p2):
     '''convert positions p1 and p2 to angles phi1 and ph2'''
     v1 = p1-center
     v2 = p2-p1
-    phi1 = np.arctan(v1[0]/float(v1[1]))
-    phi2 = np.arctan(v2[0]/float(v2[1])) + phi1
+    phi1 = np.arctan2(v1[0],float(v1[1]))
+    phi2 = np.arctan2(v2[0],float(v2[1])) + phi1
     return phi1,phi2
 
 class Tracking(threading.Thread):
+    def __init__(self, rotate_frames = False):
+        self.rotate_frames = rotate_frames
+        threading.Thread.__init__(self)
     def run(self):
         self.time = 0
         self.time_sec = np.zeros(1000000)
@@ -130,19 +147,22 @@ class Tracking(threading.Thread):
         self.wtrajectory2 = np.zeros((2,1000000))
         self.t_old = 0
         while True:
-            x1,y1,x2,y2,end = capture()
-            p1, p2 = to_phase_coordinate(np.array([x1, y1]),np.array([x2,y2]))
-            self.ptrajectory1[:,self.time] = p1
-            self.ptrajectory2[:,self.time] = p2
-            self.wtrajectory1[:,self.time] = (p1 - self.ptrajectory1[:,(self.time-1)]) / (time() - self.t_old)
-            self.wtrajectory2[:,self.time] = (p2 - self.ptrajectory2[:,(self.time-1)]) / (time() - self.t_old)
-            self.trajectory1[:,self.time] = y1,shape[0]-x1
-            self.trajectory2[:,self.time] = y2,shape[0]-x2
-            self.time_sec[self.time] = time() - t0
-            self.time += 1
-            self.t_old = time()
-            if end:
-                break
+	    try:
+	        x1,y1,x2,y2,end = capture(self.rotate_frames)
+                p1, p2 = to_phase_coordinate(np.array([x1, y1]),np.array([x2,y2]))
+                self.ptrajectory1[:,self.time] = p1
+                self.ptrajectory2[:,self.time] = p2
+                self.wtrajectory1[:,self.time] = (p1 - self.ptrajectory1[:,(self.time-1)]) / (time() - self.t_old)
+                self.wtrajectory2[:,self.time] = (p2 - self.ptrajectory2[:,(self.time-1)]) / (time() - self.t_old)
+                self.trajectory1[:,self.time] = y1,shape[0]-x1
+                self.trajectory2[:,self.time] = y2,shape[0]-x2
+                self.time_sec[self.time] = time() - t0
+                self.time += 1
+                self.t_old = time()
+                if end:
+                    break
+            except ValueError:
+	        print "Oh no, I've lost the marker!"
 
 class Plot(object):
     def __init__(self, track, frames=1000,interval=100):
@@ -239,6 +259,6 @@ class Plot(object):
 
 
 calibration()
-track = Tracking()
+track = Tracking(rotate_frames=True)
 track.start()
 plot = Plot(track)
