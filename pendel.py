@@ -15,7 +15,7 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-__version__ = 0.2
+__version__ = 0.5
 
 
 import cv2
@@ -30,7 +30,6 @@ from time import time
 pl.ion()
 
 cap = cv2.VideoCapture(1)
-cv2.namedWindow('tracker')
 
 def find_position(mask):
     labeled_mask,num_label = ndimage.label(mask)
@@ -44,8 +43,10 @@ positions_for_calibration = []
 def set_center_pos(event,x,y,flags,param):
     if event==cv2.EVENT_LBUTTONDBLCLK:
         positions_for_calibration.append(np.array([x,y]))
+        print 'recieved coordinates: ' + repr([x,y])
 
 center = np.array([0,0])
+roi = [None,None,None,None]
 color_tolerance = 5
 saturation_tolerance = 100
 value_tolerance = 100
@@ -54,10 +55,14 @@ colors = []
 color1range = []
 color2range = []
 shape = []
+frame_rate = [None]
 shift_color = lambda color,factor: np.array([np.clip(color[0]+factor*color_tolerance,0,255),np.clip(color[1]+factor*saturation_tolerance,0,255),np.clip(color[2]+factor*value_tolerance,0,255)],dtype=np.uint8)
+circle_mask = None
+zeroframe = None
 
 def calibration():
     '''Show the video from the webcam and set position of the center, color of the first marker and color of the second marker chosen by the user with three consecutive double clicks'''
+    cv2.namedWindow('calibration')
     #reset previous calibartion values
     if len(positions_for_calibration)==2:
         for i in range(2):
@@ -67,15 +72,19 @@ def calibration():
             color1range.pop()
             color2range.pop()
     print 'Calibration: please doubleclick on the center, the first marker and the second marker'
-    cv2.setMouseCallback('tracker',set_center_pos)
+    cv2.setMouseCallback('calibration',set_center_pos)
+    time_start = time()
+    frames = 0
     while True:
         _, frame = cap.read()
-        cv2.imshow('tracker',frame)
+        frames += 1
+        cv2.imshow('calibration',frame)
         k = cv2.waitKey(5) & 0xFF
         if k == 27:
             break
         if len(positions_for_calibration)==3:
             break
+    frame_rate[0] = frames / float(time() - time_start)
     shape.append(frame.shape[0])
     shape.append(frame.shape[1])
     center[0] = positions_for_calibration[0][0]
@@ -92,10 +101,30 @@ def calibration():
     colors.append(color2)
     color2range.append(shift_color(color2,-1))
     color2range.append(shift_color(color2,+1))
+    #select region of interest
+    v = np.array([x,y]) - center
+    r = np.sqrt(np.dot(v,v))
+    r = 1.1 * r
+    roi[0] = int(center[0]-r)
+    roi[1] = int(center[0]+r)
+    roi[2] = int(center[1]-r)
+    roi[3] = int(center[1]+r)
     print "calibration complete"
+    if np.any(np.array(roi)<0):
+        print "warning: chosen ROI exceeds frame", repr(roi)
+        croi = np.clip(np.array(roi),0,np.inf)
+        roi[0],roi[1],roi[2],roi[3] = int(croi[0]),int(croi[1]),int(croi[2]),int(croi[3])
+    cv2.destroyWindow('calibration')
+    #circle mask
+    global circle_mask
+    xc,yc = np.meshgrid(np.arange(frame.shape[0]),np.arange(frame.shape[1]))
+    circle_mask = (xc-center[1])**2+(yc-center[0])**2 < r**2
+    circle_mask = np.transpose(np.array([circle_mask,circle_mask,circle_mask]))
+    global zeroframe 
+    zeroframe = np.zeros(frame.shape,dtype=np.uint8)
     return None
 
-def capture(rotate_frames):
+def capture(rotate_frames, show_roi):
     '''capture one frame, locate the markers and return position'''
     _, frame = cap.read()
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -111,13 +140,15 @@ def capture(rotate_frames):
     x2,y2 = find_position(mask_color2)
     cv2.circle(frame, (y2, x2), 2, (255, 255, 255), 20)
     #display the image
+    #pdb.set_trace()
+    frame = np.where(circle_mask,frame,zeroframe)
     if rotate_frames:
         phi1,phi2 = to_phase_coordinate(np.array([y1,x1]),np.array([y2,x2]))
         R = cv2.getRotationMatrix2D(tuple(center),-phi1*180/np.pi,1)
-        frame_rotated = cv2.warpAffine(frame,R,(frame.shape[1],frame.shape[0]))
-        cv2.imshow('tracker',frame_rotated)
-    else:
-        cv2.imshow('tracker',frame)
+        frame = cv2.warpAffine(frame,R,(frame.shape[1],frame.shape[0]))
+    if show_roi:
+        frame = frame[roi[2]:roi[3],roi[0]:roi[1]]
+    cv2.imshow('tracker',frame)
     k = cv2.waitKey(5) & 0xFF
     if k == 27:
         return x1,y1,x2,y2,True
@@ -133,8 +164,10 @@ def to_phase_coordinate(p1,p2):
     return phi1,phi2
 
 class Tracking(threading.Thread):
-    def __init__(self, rotate_frames = False):
+    def __init__(self, rotate_frames = False, show_roi = True):
+        cv2.namedWindow('tracker')
         self.rotate_frames = rotate_frames
+        self.show_roi = show_roi
         threading.Thread.__init__(self)
     def run(self):
         self.time = 0
@@ -148,7 +181,7 @@ class Tracking(threading.Thread):
         self.t_old = 0
         while True:
 	    try:
-	        x1,y1,x2,y2,end = capture(self.rotate_frames)
+	        x1,y1,x2,y2,end = capture(self.rotate_frames, self.show_roi)
                 p1, p2 = to_phase_coordinate(np.array([x1, y1]),np.array([x2,y2]))
                 self.ptrajectory1[:,self.time] = p1
                 self.ptrajectory2[:,self.time] = p2
@@ -160,6 +193,7 @@ class Tracking(threading.Thread):
                 self.time += 1
                 self.t_old = time()
                 if end:
+                    cv2.destroyWindow('tracker')
                     break
             except ValueError:
 	        print "Oh no, I've lost the marker!"
@@ -259,6 +293,7 @@ class Plot(object):
 
 
 calibration()
-track = Tracking(rotate_frames=True)
+#x1,y1,x2,y2,end,frame = capture(True, False)
+track = Tracking(rotate_frames=True, show_roi = False)
 track.start()
-plot = Plot(track)
+#plot = Plot(track)
